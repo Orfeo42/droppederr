@@ -1,0 +1,7 @@
+version: v2.14.0
+name: custom-gcl
+destination: .cache
+plugins:
+  - module: 'github.com/Orfeo42/droppederr'
+    path: .
+    import: 'github.com/Orfeo42/droppederr/plugin'

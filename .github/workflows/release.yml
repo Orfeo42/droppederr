@@ -1,0 +1,115 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  custom-gcl:
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+            ext: .exe
+          - goos: windows
+            goarch: arm64
+            ext: .exe
+    steps:
+      - uses: actions/checkout@v5
+
+      # Not go-version-file: go.mod. This module builds with Go 1.25, but
+      # golangci-lint v2.14.0 requires Go >= 1.26, and this job compiles
+      # golangci-lint twice: once via go install, once inside
+      # `golangci-lint custom`. setup-go pins GOTOOLCHAIN=local, so an older
+      # toolchain here fails outright rather than fetching a newer one.
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.27"
+
+      # golangci-lint-action always runs the linter and has no install-only mode,
+      # so a lint failure there would block publishing the asset. Install the
+      # pinned binary directly instead; `golangci-lint custom` then compiles the
+      # version named in .custom-gcl.yml with the plugin from this checkout.
+      - name: Install golangci-lint
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
+
+      # CGO_ENABLED=0 so the asset is statically linked. golangci-lint custom
+      # otherwise builds with cgo, producing a binary tied to the builder's
+      # glibc, which fails on a musl image and on any glibc older than the
+      # runner's. Static means it runs on whatever the consumer has, and it is
+      # what makes GOOS/GOARCH cross-compilation work at all: `golangci-lint
+      # custom` shells out to `go build`, which honours both from the
+      # environment. The output file is named by .custom-gcl.yml, so it carries
+      # no .exe suffix even for a windows target.
+      - name: Build custom-gcl
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: golangci-lint custom
+
+      - name: Rename asset
+        run: mv .cache/custom-gcl "custom-gcl-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
+
+      - name: Upload release asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${GITHUB_REF_NAME}" "custom-gcl-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" --clobber
+
+  # goreleaser's checksums.txt covers only the artifacts it built, so the
+  # custom-gcl assets get their own checksum file. The name uses an underscore
+  # so the `custom-gcl-*` download pattern below never matches it, which would
+  # otherwise make a re-run checksum its own previous output.
+  custom-gcl-checksums:
+    needs: custom-gcl
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download custom-gcl assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release download "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --pattern "custom-gcl-*"
+
+      - name: Compute checksums
+        run: sha256sum custom-gcl-* > custom-gcl_checksums.txt
+
+      - name: Upload checksums
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" custom-gcl_checksums.txt --clobber
